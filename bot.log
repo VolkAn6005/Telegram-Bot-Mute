@@ -1,0 +1,3 @@
+2025-03-22 14:57:09,584 - __main__ - INFO - Бот запущен...
+2025-03-22 14:57:09,907 - apscheduler.scheduler - INFO - Scheduler started
+2025-03-22 14:57:09,908 - telegram.ext.Application - INFO - Application started
