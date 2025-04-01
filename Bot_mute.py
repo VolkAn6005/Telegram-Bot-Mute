@@ -10,6 +10,7 @@ from telegram.ext import (
     CommandHandler,
     CallbackContext,
     filters,
+    ChatMemberHandler,
 )
 from telegram.constants import ParseMode
 from dotenv import load_dotenv
@@ -19,7 +20,7 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
     handlers=[
-        logging.FileHandler("bot.log", encoding="utf-8"),  # Указываем UTF-8
+        logging.FileHandler("bot.log", encoding="utf-8"),
         logging.StreamHandler()
     ]
 )
@@ -36,9 +37,12 @@ BOT_RUNNING = True
 # Твой Telegram ID
 MY_ID = 362752154  # @VolkAn6005
 
+# Множество для отслеживания обработанных новых участников
+PROCESSED_USERS = set()
+
 def escape_markdown(text: str) -> str:
     """Экранирует специальные символы для MarkdownV2."""
-    escape_chars = r'_*[]()~`>#+-=|{}.!\'"'
+    escape_chars = r'_*[]()~`>#+-=|{}.!\'"\\'
     return "".join(
         "\\" + char if char in escape_chars else char for char in text
     )
@@ -71,72 +75,130 @@ async def start(update: Update, context: CallbackContext) -> None:
     try:
         user = update.effective_user
         chat_id = update.effective_chat.id
+        user_key = f"{chat_id}:{user.id}"  # Уникальный ключ для чата и пользователя
+
+        # Проверяем, был ли пользователь уже обработан
+        if user_key in PROCESSED_USERS:
+            logger.info(f"Пользователь {user.id} ({user.full_name}) уже обработан в чате {chat_id}, пропускаем")
+            return
+
         logger.info(
             f"Новый пользователь: {user.id} ({user.full_name}) в чате "
             f"{chat_id}"
         )
 
-        chat_member = await context.bot.get_chat_member(
-            chat_id=chat_id,
-            user_id=user.id,
-        )
-        if chat_member.status == "creator":
-            logger.info(
-                f"Пользователь {user.id} — владелец чата, обработка не "
-                f"требуется"
+        try:
+            chat_member = await context.bot.get_chat_member(
+                chat_id=chat_id,
+                user_id=user.id,
             )
+            if chat_member.status == "creator":
+                logger.info(
+                    f"Пользователь {user.id} — владелец чата, обработка не "
+                    f"требуется"
+                )
+                return
+            if chat_member.status == "restricted" and not chat_member.can_send_messages:
+                logger.info(f"Права пользователя {user.id} уже ограничены в чате {chat_id}")
+                PROCESSED_USERS.add(user_key)
+                return
+        except Exception as e:
+            logger.error(f"Ошибка при получении информации о участнике {user.id}: {e}")
+
+        try:
+            logger.info(f"Ограничиваем права пользователя {user.id} в чате {chat_id}")
+            await context.bot.restrict_chat_member(
+                chat_id=chat_id,
+                user_id=user.id,
+                permissions={
+                    "can_send_messages": False,
+                    "can_send_media_messages": False,
+                    "can_send_other_messages": False,
+                    "can_add_web_page_previews": False,
+                },
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при ограничении прав пользователя {user.id}: {e}")
             return
 
-        logger.info(
-            f"Ограничиваем права пользователя {user.id} в чате {chat_id}"
-        )
-        await context.bot.restrict_chat_member(
-            chat_id=chat_id,
-            user_id=user.id,
-            permissions={
-                "can_send_messages": False,
-                "can_send_media_messages": False,
-                "can_send_other_messages": False,
-                "can_add_web_page_previews": False,
-            },
-        )
+        try:
+            escaped_full_name = escape_markdown(user.full_name)
+            message_text = (
+                f"Привет, {escaped_full_name}\\! "
+                "Чтобы писать в чат, свяжись с администратором\\."
+            )
+            keyboard = [
+                [InlineKeyboardButton("Написать админу", url="https://t.me/frau_ponomareva")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
 
-        escaped_full_name = escape_markdown(user.full_name)
-        message_text = (
-            f"Привет, {escaped_full_name}\\! "
-            "Чтобы писать в чат, свяжись с администратором\\."
-        )
-        keyboard = [
-            [InlineKeyboardButton("Написать админу", url="https://t.me/frau_ponomareva")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+            instruction_message = await context.bot.send_message(
+                chat_id=chat_id,
+                text=message_text,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=reply_markup,
+            )
+            logger.info(
+                f"Сообщение отправлено: message_id="
+                f"{instruction_message.message_id}"
+            )
 
-        instruction_message = await context.bot.send_message(
-            chat_id=chat_id,
-            text=message_text,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=reply_markup,
-        )
-        logger.info(
-            f"Сообщение отправлено: message_id="
-            f"{instruction_message.message_id}"
-        )
+            context.job_queue.run_once(
+                delete_message,
+                30,
+                data={
+                    "chat_id": chat_id,
+                    "message_id": instruction_message.message_id,
+                },
+            )
+            logger.info(
+                "Задача на удаление сообщения через 30 секунд установлена"
+            )
 
-        context.job_queue.run_once(
-            delete_message,
-            30,
-            data={
-                "chat_id": chat_id,
-                "message_id": instruction_message.message_id,
-            },
-        )
-        logger.info(
-            "Задача на удаление сообщения через 30 секунд установлена"
-        )
+            PROCESSED_USERS.add(user_key)
+        except Exception as e:
+            logger.error(f"Ошибка при отправке сообщения пользователю {user.id}: {e}")
+
     except Exception as e:
         logger.error(
-            f"Ошибка для user_id {user.id} в chat_id {chat_id}: {e}"
+            f"Общая ошибка для user_id {user.id} в chat_id {chat_id}: {e}"
         )
+
+async def chat_member_update(update: Update, context: CallbackContext) -> None:
+    """Обрабатывает изменения статуса участников."""
+    global BOT_RUNNING
+    if not BOT_RUNNING:
+        logger.info("Бот остановлен, обработка обновлений статуса пропущена")
+        return
+
+    logger.info("Получено обновление chat_member")
+
+    chat_member_update = update.chat_member
+    if chat_member_update is None:
+        logger.warning("update.chat_member пустой, пропускаем обработку")
+        return
+
+    old_status = chat_member_update.old_chat_member.status
+    new_status = chat_member_update.new_chat_member.status
+    user = chat_member_update.new_chat_member.user
+    chat_id = chat_member_update.chat.id
+
+    logger.info(f"Старый статус: {old_status}, Новый статус: {new_status}, User ID: {user.id}, Чат: {chat_id}")
+
+    if old_status != new_status:
+        if new_status == "member" and old_status in ["left", "kicked"]:
+            logger.info(f"Новый участник {user.id} ({user.full_name}) вступил в чат {chat_id} (через ChatMemberHandler)")
+            await start(update, context)  # Обрабатываем только настоящее вступление
+        elif new_status == "left":
+            logger.info(f"Пользователь {user.id} ({user.full_name}) вышел из чата {chat_id}")
+            user_key = f"{chat_id}:{user.id}"
+            PROCESSED_USERS.discard(user_key)
+        elif new_status in ["administrator", "creator"]:
+            logger.info(f"Пользователь {user.id} ({user.full_name}) стал {new_status} в чате {chat_id}")
+        else:
+            logger.info(f"Статус пользователя {user.id} ({user.full_name}) изменился с {old_status} на {new_status} в чате {chat_id}")
+    else:
+        logger.info(f"Статус пользователя {user.id} ({user.full_name}) не изменился: {old_status}")
 
 async def start_bot(update: Update, context: CallbackContext) -> None:
     """Команда /start для запуска бота."""
@@ -197,7 +259,6 @@ async def send_log(update: Update, context: CallbackContext) -> None:
     chat_id = update.effective_chat.id
     user = update.effective_user
 
-    # Проверяем, что команду вызывает @VolkAn6005
     if user.id != MY_ID:
         await context.bot.send_message(
             chat_id=chat_id,
@@ -214,21 +275,18 @@ async def send_log(update: Update, context: CallbackContext) -> None:
         return
 
     try:
-        # Читаем последние 100 строк из файла
         with open(log_file_path, "r", encoding="utf-8", errors="replace") as log_file:
             lines = log_file.readlines()
-            last_lines = lines[-100:]  # Берем последние 100 строк
+            last_lines = lines[-100:]
             log_content = "".join(last_lines)
 
-        # Если текст короткий, отправляем как сообщение
-        if len(log_content) < 4096:  # Ограничение Telegram на длину сообщения
+        if len(log_content) < 4096:
             await context.bot.send_message(
                 chat_id=MY_ID,
                 text=f"Последние 100 строк логов:\n```\n{log_content}\n```",
                 parse_mode=ParseMode.MARKDOWN_V2
             )
         else:
-            # Если текст длинный, отправляем как файл
             log_bytes = log_content.encode("utf-8")
             log_file_io = BytesIO(log_bytes)
             log_file_io.name = "last_100_logs.txt"
@@ -258,6 +316,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start_bot))
     app.add_handler(CommandHandler("stop", stop_bot))
     app.add_handler(CommandHandler("log", send_log))
+
     app.add_handler(
         MessageHandler(
             filters.StatusUpdate.NEW_CHAT_MEMBERS,
@@ -265,8 +324,15 @@ def main() -> None:
         )
     )
 
+    app.add_handler(
+        ChatMemberHandler(
+            chat_member_update,
+            ChatMemberHandler.CHAT_MEMBER,
+        )
+    )
+
     logger.info("Бот запущен...")
-    app.run_polling()
+    app.run_polling(allowed_updates=["message", "chat_member"])
 
 if __name__ == "__main__":
     main()
