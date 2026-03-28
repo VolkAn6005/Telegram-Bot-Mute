@@ -34,6 +34,7 @@ logging.basicConfig(
     ]
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # --- ЗАГРУЗКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
@@ -145,10 +146,7 @@ async def start(update: Update, context: CallbackContext) -> None:
                 logger.info(f"Пользователь {user.id} ({user.full_name}) уже обработан в чате {chat_id}, пропускаем")
                 continue
 
-            logger.info(
-                f"Новый пользователь: {user.id} ({user.full_name}) в чате "
-                f"{chat_id}"
-            )
+            logger.info(f"Новый пользователь: {user.id} ({user.full_name}), чат {chat_id}")
 
             try:
                 chat_member = await context.bot.get_chat_member(
@@ -175,7 +173,6 @@ async def start(update: Update, context: CallbackContext) -> None:
                 continue
 
             try:
-                logger.info(f"Ограничиваем права пользователя {user.id} в чате {chat_id}")
                 await context.bot.restrict_chat_member(
                     chat_id=chat_id,
                     user_id=user.id,
@@ -206,11 +203,6 @@ async def start(update: Update, context: CallbackContext) -> None:
                     parse_mode=ParseMode.MARKDOWN_V2,
                     reply_markup=reply_markup,
                 )
-                logger.info(
-                    f"Сообщение отправлено: message_id="
-                    f"{instruction_message.message_id}"
-                )
-
                 if context.job_queue:
                     context.job_queue.run_once(
                         delete_message,
@@ -220,9 +212,10 @@ async def start(update: Update, context: CallbackContext) -> None:
                             "message_id": instruction_message.message_id,
                         },
                     )
-                    logger.info("Задача на удаление сообщения через 30 секунд установлена")
                 else:
                     logger.warning("JobQueue недоступен, сообщение не будет удалено автоматически.")
+
+                logger.info(f"✅ {user.full_name} ({user.id}) ограничен, msg={instruction_message.message_id}, чат {chat_id}")
 
                 PROCESSED_USERS.add(user_key)
                 
@@ -262,13 +255,9 @@ async def chat_member_update(update: Update, context: CallbackContext) -> None:
         logger.info(f"Бот остановлен для чата {chat_id}, обработка обновлений статуса пропущена")
         return
 
-    logger.info("Получено обновление chat_member")
-
     old_status = member_update.old_chat_member.status
     new_status = member_update.new_chat_member.status
     user = member_update.new_chat_member.user
-
-    logger.info(f"Старый статус: {old_status}, Новый статус: {new_status}, User ID: {user.id}, Чат: {chat_id}")
 
     if old_status != new_status:
         if new_status == "member" and old_status in ["left", "kicked"]:
@@ -281,9 +270,9 @@ async def chat_member_update(update: Update, context: CallbackContext) -> None:
         elif new_status in ["administrator", "creator"]:
             logger.info(f"Пользователь {user.id} ({user.full_name}) стал {new_status} в чате {chat_id}")
         else:
-            logger.info(f"Статус пользователя {user.id} ({user.full_name}) изменился с {old_status} на {new_status} в чате {chat_id}")
+            logger.debug(f"Статус {user.id} ({user.full_name}): {old_status} → {new_status}, чат {chat_id}")
     else:
-        logger.info(f"Статус пользователя {user.id} ({user.full_name}) не изменился: {old_status}")
+        logger.debug(f"Статус {user.id} ({user.full_name}) не изменился: {old_status}")
 
 async def check_admin_permissions(update: Update, context: CallbackContext) -> bool:
     """
